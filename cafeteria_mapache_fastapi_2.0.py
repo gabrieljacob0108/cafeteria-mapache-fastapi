@@ -6,8 +6,6 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 
 load_dotenv(".env")
-password = os.environ.get("MONGODB_PWD")
-uri = f"mongodb+srv://gabrieljacob:{password}@cluster0.w20wfrh.mongodb.net/?appName=Cluster0"
 client = MongoClient(uri)
 db = client["mapache"]
 coleccion_ventas = db["cafeteria"]
