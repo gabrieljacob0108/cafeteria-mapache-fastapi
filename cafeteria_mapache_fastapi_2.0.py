@@ -42,11 +42,11 @@ postres = [
 ]
 
 menu_dict = {item["id"]: item for item in (bebidas + postres)}
-
 class ContenidoPago(BaseModel):
     nombre_cliente: Optional[str] = "anonimo"
-    productos_ids: List[int] = Field(..., min_items=1, description="Lista de IDs de productos comprados")
+    productos_ids: List[int] = Field(..., min_length=1, description="Lista de IDs de productos comprados")
     dinero_ingresado: int
+
 
 @app.get("/menu")
 def obtener_menu():
