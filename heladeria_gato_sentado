@@ -1,360 +1,183 @@
 import os
-
 from typing import List, Optional
-
 from uuid import UUID, uuid4
-
 from dotenv import load_dotenv
 
-
-
 from litestar import Litestar, post, get, status_codes
-
 from litestar.exceptions import HTTPException, BadRequestException
-
 from litestar.config.cors import CORSConfig
-
-
+from litestar.di import Provide
 
 from pydantic import BaseModel, Field
 
-
-
 from sqlalchemy import String, Integer, ForeignKey, select
-
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-
-
 
 load_dotenv(".env")
 
-
-
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/gato_sentado")
 
-
-
 engine = create_async_engine(DATABASE_URL, echo=False)
-
 async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
+async def prove_db_session() -> AsyncSession:
+    async with async_session() as session:
+        yield session
 
 class Base(DeclarativeBase):
-
     pass
 
-
-
 class VentaHelado(Base):
-
     __tablename__ = "ventas_helado"
 
-
-
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-
     cliente: Mapped[str] = mapped_column(String(100), index=True)
-
     recipiente: Mapped[str] = mapped_column(String(50))
-
     precio_base: Mapped[int] = mapped_column(Integer)
-
     precio_total: Mapped[int] = mapped_column(Integer)
-
     
-
     sabores: Mapped[List["HeladoSabor"]] = relationship(back_populates="venta", cascade="all, delete-orphan", lazy="selectin")
-
     toppings: Mapped[List["HeladoTopping"]] = relationship(back_populates="venta", cascade="all, delete-orphan", lazy="selectin")
 
-
-
 class HeladoSabor(Base):
-
     __tablename__ = "helado_sabores"
 
-
-
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-
     venta_id: Mapped[UUID] = mapped_column(ForeignKey("ventas_helado.id"))
-
     sabor: Mapped[str] = mapped_column(String(50))
-
     
-
     venta: Mapped["VentaHelado"] = relationship(back_populates="sabores")
 
-
-
 class HeladoTopping(Base):
-
     __tablename__ = "helado_toppings"
 
-
-
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-
     venta_id: Mapped[UUID] = mapped_column(ForeignKey("ventas_helado.id"))
-
     nombre: Mapped[str] = mapped_column(String(50))
-
     precio: Mapped[int] = mapped_column(Integer)
-
     
-
     venta: Mapped["VentaHelado"] = relationship(back_populates="toppings")
 
-
-
 class CajaTienda(Base):
-
     __tablename__ = "caja_tienda"
 
-
-
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False, default=1)
-
     saldo_historico: Mapped[int] = mapped_column(Integer, default=0)
 
-
-
 RECIPIENTES = {
-
     "cono_sencillo": {"nombre": "Cono Sencillo", "precio": 3500, "limite_sabores": 2},
-
     "cono_waffle": {"nombre": "Cono de Waffle", "precio": 5000, "limite_sabores": 3},
-
     "vaso_mediano": {"nombre": "Vaso Mediano", "precio": 4000, "limite_sabores": 2},
-
     "vaso_grande": {"nombre": "Vaso Grande", "precio": 6500, "limite_sabores": 4}
-
 }
-
-
 
 SABORES_PERMITIDOS = {"vainilla", "chocolate", "arequipe", "frutos rojos", "maracuyá", "menta granizada", "limón"}
 
-
-
 TOPPINGS_DISPONIBLES = {
-
     "chispitas": {"nombre": "Chispitas de Colores", "precio": 800},
-
     "galletas": {"nombre": "Trozos de Galleta Oreo", "precio": 1500},
-
     "fresas": {"nombre": "Fresas Picadas", "precio": 1200},
-
     "kiwi": {"nombre": "Kiwi en Cubos", "precio": 1400},
-
     "chocolate_liquido": {"nombre": "Salsa de Chocolate Hersheys", "precio": 1000}
-
 }
 
-
-
 class PedidoHeladoDTO(BaseModel):
-
     recipiente_id: str
-
     sabores: List[str]
-
     dinero_ingresado: int
-
     nombre_cliente: Optional[str] = "anonimo"
-
     toppings_ids: List[str] = Field(default_factory=list)
 
-
-
 @get("/menu")
-
 async def obtener_menu() -> dict:
-
     return {
-
         "recipientes_disponibles": RECIPIENTES,
-
         "sabores_disponibles": list(SABORES_PERMITIDOS),
-
         "toppings_disponibles": TOPPINGS_DISPONIBLES
-
     }
 
-
-
 @post("/comprar", status_code=status_codes.HTTP_201_CREATED)
-
-async def procesar_pago(data: PedidoHeladoDTO) -> dict:
-
+async def procesar_pago(data: PedidoHeladoDTO, db_session: AsyncSession) -> dict:
     cliente_limpio = (data.nombre_cliente or "anonimo").strip().lower()
-
     
-
     if data.recipiente_id not in RECIPIENTES:
-
         raise BadRequestException(detail=f"El tipo de cono/vaso '{data.recipiente_id}' no existe en el menú.")
-
     info_recipiente = RECIPIENTES[data.recipiente_id]
-
     
-
     if not data.sabores:
-
         raise BadRequestException(detail="Debes elegir al menos un sabor de helado.")
-
     if len(data.sabores) > info_recipiente["limite_sabores"]:
-
         raise BadRequestException(
-
             detail=f"El recipiente '{info_recipiente['nombre']}' solo permite hasta {info_recipiente['limite_sabores']} sabores."
-
         )
-
     for sabor in data.sabores:
-
         if sabor.strip().lower() not in SABORES_PERMITIDOS:
-
             raise BadRequestException(detail=f"El sabor '{sabor}' no está disponible hoy.")
 
-
-
     total_cuenta = info_recipiente["precio"]
-
     toppings_db_objetos = []
-
     
-
     for t_id in data.toppings_ids:
-
         if t_id not in TOPPINGS_DISPONIBLES:
-
             raise BadRequestException(detail=f"El topping '{t_id}' no existe en el menú.")
-
         topping_info = TOPPINGS_DISPONIBLES[t_id]
-
         total_cuenta += topping_info["precio"]
-
         toppings_db_objetos.append(HeladoTopping(nombre=topping_info["nombre"], precio=topping_info["precio"]))
 
-
-
     if data.dinero_ingresado < total_cuenta:
-
         raise HTTPException(
-
             status_code=status_codes.HTTP_400_BAD_REQUEST,
-
             detail=f"Dinero insuficiente. Total del helado personalizado: ${total_cuenta} COP."
-
         )
-
-
 
     cambio = data.dinero_ingresado - total_cuenta
 
-
-
-    async with async_session() as session:
-
-        async with session.begin():
-
+    async with db_session.begin():
+        nueva_venta = VentaHelado(
+            cliente=cliente_limpio,
+            recipiente=info_recipiente["nombre"],
+            precio_base=info_recipiente["precio"],
+            precio_total=total_cuenta,
+            sabores=[HeladoSabor(sabor=s.strip().lower()) for s in data.sabores],
+            toppings=toppings_db_objetos
+        )
+        db_session.add(nueva_venta)
+        
+        stmt = select(CajaTienda).where(CajaTienda.id == 1).with_for_update()
+        result = await db_session.execute(stmt)
+        caja = result.scalar_one_or_none()
+        
+        if not caja:
+            caja = CajaTienda(id=1, saldo_historico=total_cuenta)
+            db_session.add(caja)
+        else:
+            caja.saldo_historico += total_cuenta
             
-
-            nueva_venta = VentaHelado(
-
-                cliente=cliente_limpio,
-
-                recipiente=info_recipiente["nombre"],
-
-                precio_base=info_recipiente["precio"],
-
-                precio_total=total_cuenta,
-
-                sabores=[HeladoSabor(sabor=s.strip().lower()) for s in data.sabores],
-
-                toppings=toppings_db_objetos
-
-            )
-
-            session.add(nueva_venta)
-
-            
-
-           
-
-            stmt = select(CajaTienda).where(CajaTienda.id == 1).with_for_update()
-
-            result = await session.execute(stmt)
-
-            caja = result.scalar_one_or_none()
-
-            
-
-            if not caja:
-
-                caja = CajaTienda(id=1, saldo_historico=total_cuenta)
-
-                session.add(caja)
-
-            else:
-
-                caja.saldo_historico += total_cuenta
-
-                
-
-            saldo_actual_tienda = caja.saldo_historico
-
-
+        saldo_actual_tienda = caja.saldo_historico
 
     return {
-
         "mensaje": "¡Disfruta tu helado en la Heladería Gato Sentado! 🐱🍦",
-
         "cliente": cliente_limpio,
-
         "recipiente_usado": info_recipiente["nombre"],
-
         "sabores_servidos": [s.strip().lower() for s in data.sabores],
-
         "total_cobrado": total_cuenta,
-
         "dinero_recibido": data.dinero_ingresado,
-
         "cambio_devuelto": cambio,
-
         "saldo_historico_caja_postgres": saldo_actual_tienda
-
     }
 
-
-
 async def inicializar_base_de_datos(app: Litestar) -> None:
-
     async with engine.begin() as conn:
-
         await conn.run_sync(Base.metadata.create_all)
-
-
 
 cors_config = CORSConfig(allow_origins=["*"])
 
-
-
 app = Litestar(
-
     route_handlers=[obtener_menu, procesar_pago],
-
     on_startup=[inicializar_base_de_datos],
-
+    dependencies={"db_session": Provide(prove_db_session)},
     cors_config=cors_config,
-
     title="Heladería Gato Sentado API"
-
 )
-
-
-
