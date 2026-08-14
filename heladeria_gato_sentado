@@ -262,6 +262,8 @@ async def procesar_pago(data: PedidoHeladoDTO) -> dict:
 
         async with session.begin():
 
+            
+
             nueva_venta = VentaHelado(
 
                 cliente=cliente_limpio,
@@ -282,7 +284,13 @@ async def procesar_pago(data: PedidoHeladoDTO) -> dict:
 
             
 
-            caja = await session.get(CajaTienda, 1)
+           
+
+            stmt = select(CajaTienda).where(CajaTienda.id == 1).with_for_update()
+
+            result = await session.execute(stmt)
+
+            caja = result.scalar_one_or_none()
 
             
 
@@ -346,5 +354,7 @@ app = Litestar(
 
     title="Heladería Gato Sentado API"
 
-) 
+)
+
+
 
