@@ -1,5 +1,5 @@
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
 from dotenv import load_dotenv
 from pymongo import MongoClient
 
@@ -12,7 +12,7 @@ coleccion_pedidos = db["pasteleria"]
 coleccion_tokens = db["tokens"]
 
 app = Flask(__name__)
-carrito = []
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "mapache_secreto_super_seguro_123")
 
 postres = [
     {"id": 1, "nombre": "pastel red velvet", "precio": 20000},
@@ -42,26 +42,27 @@ def obtener_menu():
 
 @app.route("/carrito", methods=["GET"])
 def ver_carrito():
-    total = sum(item["precio_final"] for item in carrito)
-    return jsonify({"carrito": carrito, "total": total}), 200
+    carrito_usuario = session.get("carrito", [])
+    total = sum(item["precio_final"] for item in carrito_usuario)
+    return jsonify({"carrito": carrito_usuario, "total": total}), 200
 
 @app.route("/pedido", methods=["POST"])
 def realizar_pedido():
     datos = request.get_json()
     if not datos or not datos.get("id"):
-        return jsonify({"error": "debes enviar un id"}), 400
+        return jsonify({}), 400
 
     postre = next((p for p in postres if p["id"] == datos["id"]), None)
     if not postre:
-        return jsonify({"error": "Postre no encontrado"}), 404
+        return jsonify({}), 404
 
     precio_total = postre["precio"]
-    topping_usado = "sin topping"
+    topping_usado = ""
 
     if datos.get("topping"):
         topping_info = next((t for t in toppings if t["nombre"] == datos["topping"]), None)
         if not topping_info:
-            return jsonify({"error": "Topping no existe"}), 400
+            return jsonify({}), 400
         precio_total += topping_info["precio"]
         topping_usado = datos["topping"]
 
@@ -71,23 +72,28 @@ def realizar_pedido():
         "topping": topping_usado,
         "precio_final": precio_total
     }
-    carrito.append(item)
-    return jsonify({"mensaje": "Agregado al carrito", "item": item, "total_items": len(carrito)}), 200
+    
+    carrito_usuario = session.get("carrito", [])
+    carrito_usuario.append(item)
+    session["carrito"] = carrito_usuario
+    
+    return jsonify({"item": item, "total_items": len(carrito_usuario)}), 200
 
 @app.route("/pagar", methods=["POST"])
 def pagar_pedido():
-    if not carrito:
-        return jsonify({"error": "Carrito vacío"}), 400
+    carrito_usuario = session.get("carrito", [])
+    if not carrito_usuario:
+        return jsonify({}), 400
 
     datos = request.get_json()
     if not datos or not datos.get("pago_usuario") or not datos.get("nombre_cliente"):
-        return jsonify({"error": "debes enviar pago_usuario y nombre_cliente"}), 400
+        return jsonify({}), 400
 
-    total_cuenta = sum(item["precio_final"] for item in carrito)
+    nombre_limpio = datos["nombre_cliente"].strip().lower()
+    total_cuenta = sum(item["precio_final"] for item in carrito_usuario)
 
     if datos["pago_usuario"] < total_cuenta:
         return jsonify({
-            "error": "Dinero insuficiente",
             "total": total_cuenta,
             "faltante": total_cuenta - datos["pago_usuario"]
         }), 400
@@ -95,44 +101,33 @@ def pagar_pedido():
     cambio = datos["pago_usuario"] - total_cuenta
 
     coleccion_pedidos.insert_one({
-        "cliente": datos["nombre_cliente"],
-        "items": carrito.copy(),
+        "cliente": nombre_limpio,
+        "items": carrito_usuario,
         "total": total_cuenta
     })
 
-    cliente_tokens = coleccion_tokens.find_one({"nombre": datos["nombre_cliente"]})
-    if cliente_tokens:
-        coleccion_tokens.update_one(
-            {"nombre": datos["nombre_cliente"]},
-            {"$inc": {"tokens": 1}}
-        )
-        tokens_actuales = cliente_tokens["tokens"] + 1
-    else:
-        coleccion_tokens.insert_one({"nombre": datos["nombre_cliente"], "tokens": 1})
-        tokens_actuales = 1
+    resultado_token = coleccion_tokens.find_one_and_update(
+        {"nombre": nombre_limpio},
+        {"$inc": {"tokens": 1}},
+        upsert=True,
+        return_document=True
+    )
+    tokens_actuales = resultado_token["tokens"]
 
-    premio = "Sigue acumulando 🦝"
     if tokens_actuales >= 20:
-        premio = "¡PELUCHE MAPACHE! 🦝"
         coleccion_tokens.update_one(
-            {"nombre": datos["nombre_cliente"]},
+            {"nombre": nombre_limpio},
             {"$set": {"tokens": 0}}
         )
         tokens_actuales = 0
-    elif tokens_actuales >= 10:
-        premio = "¡5% descuento!"
-    elif tokens_actuales >= 5:
-        premio = "¡Postre gratis!"
 
-    carrito.clear()
+    session.pop("carrito", None)
 
     return jsonify({
-        "mensaje": "Pago exitoso",
-        "cliente": datos["nombre_cliente"],
+        "cliente": nombre_limpio,
         "total": total_cuenta,
         "cambio": cambio,
-        "tokens_mapache": tokens_actuales,
-        "premio": premio
+        "tokens_mapache": tokens_actuales
     }), 200
 
 if __name__ == "__main__":
