@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from pymongo import MongoClient
+from pymongo import MongoClient, UpdateOne
 
 load_dotenv(".env")
 password = os.environ.get("MONGODB_PWD")
@@ -11,32 +11,40 @@ db = client["tienda"]
 coleccion = db["supermercado"]
 saldo_col = db["saldo_supermercado"]
 
-
 def cargar_datos():
-    productos = list(coleccion.find({}, {"_id": 0}))
-    saldo_doc = saldo_col.find_one({}, {"_id": 0})
+    productos = list(coleccion.find({}))
+    saldo_doc = saldo_col.find_one({"config": "contabilidad"})
     saldo = saldo_doc["saldo"] if saldo_doc else 100000
     return {"productos": productos, "saldo": saldo} if productos else None
 
-
-def guardar_datos(saldo, productos):
-    coleccion.delete_many({})
+def guardar_datos_iniciales(saldo, productos):
     coleccion.insert_many(productos)
-    saldo_col.delete_many({})
-    saldo_col.insert_one({"saldo": saldo})
+    saldo_col.update_one(
+        {"config": "contabilidad"},
+        {"$set": {"saldo": saldo}},
+        upsert=True
+    )
 
+def sincronizar_inventario_y_saldo(saldo, productos):
+    operaciones = [
+        UpdateOne({"nombre": p["nombre"]}, {"$set": {"stock": p["stock"], "precio": p["precio"]}}, upsert=True)
+        for p in productos
+    ]
+    if operaciones:
+        coleccion.bulk_write(operaciones)
+    
+    saldo_col.update_one(
+        {"config": "contabilidad"},
+        {"$set": {"saldo": saldo}},
+        upsert=True
+    )
 
-datos_viejos = cargar_datos()
+datos_existentes = cargar_datos()
 
-if datos_viejos:
-    productos_lista = datos_viejos["productos"]
-    saldo_tienda = datos_viejos["saldo"]
-    print("¡Bienvenido de nuevo!")
+if datos_existentes:
+    productos_lista = datos_existentes["productos"]
+    saldo_tienda = datos_existentes["saldo"]
 else:
-    saldo_tienda = 100000
-    productos_lista = [...]
-    guardar_datos(saldo_tienda, productos_lista)
-
     saldo_tienda = 100000
     productos_lista = [
         {"nombre": "bolsa de papas*12", "precio": 20000, "stock": 30},
@@ -52,10 +60,8 @@ else:
         {"nombre": "galletas de soda*6paquetes", "precio": 10500, "stock": 21},
         {"nombre": "leche entera*8", "precio": 20200, "stock": 30},
     ]
-    guardar_datos(saldo_tienda, productos_lista)
-    print("¡Bienvenido de nuevo! ")
+    guardar_datos_iniciales(saldo_tienda, productos_lista)
 
-print("bienvenido a tiendas gabriel amigo!")
 pago_comprador = 0
 carrito = []
 total_cuenta = 0
@@ -76,128 +82,85 @@ variantes = {
     ],
 }
 
-
 def mostrar_menu():
-    print("\n--- MENÚ DE PRODUCTOS ---")
     for i, p in enumerate(productos_lista, 1):
-        print(f"{i}. {p['nombre']} - ${p['precio']} (Stock: {p['stock']})")
+        print(f"{i} {p['nombre']} {p['precio']} {p['stock']}")
 
-
-def condiciones(
-    saldo_tienda, pago_comprador, carrito, total_cuenta, productos_lista
-):
+def condiciones(saldo_tienda, pago_comprador, carrito, total_cuenta, productos_lista):
     while True:
         mostrar_menu()
         try:
-            eleccion = input("\nEscoge un numero: ").strip().lower()
+            eleccion = input().strip().lower()
+            if eleccion == 'no':
+                break
+                
             indices = {str(i + 1): i for i in range(len(productos_lista))}
 
             if eleccion in indices:
                 idx = indices[eleccion]
-                prod = productos_lista[idx]
+                prod_original = productos_lista[idx]
+                prod_actual = prod_original.copy()
 
-                if prod["nombre"] in variantes:
-                    print(f"\n¿Qué tipo de {prod['nombre']} quieres?")
-                    opciones = variantes[prod["nombre"]]
+                if prod_original["nombre"] in variantes:
+                    opciones = variantes[prod_original["nombre"]]
                     for i, v in enumerate(opciones, 1):
-                        print(f"{i}. {v['nombre']} - ${v['precio']}")
+                        print(f"{i} {v['nombre']} {v['precio']}")
 
                     try:
-                        eleccion_variante = int(
-                            input("Escoge una opción: ").strip()
-                        )
+                        eleccion_variante = int(input().strip())
                         if 1 <= eleccion_variante <= len(opciones):
                             variante_elegida = opciones[eleccion_variante - 1]
-                            prod = {
-                                "nombre": variante_elegida["nombre"],
-                                "precio": variante_elegida["precio"],
-                                "stock": prod["stock"],
-                            }
-                        else:
-                            print(
-                                "Opción inválida, se agrega la versión normal."
-                            )
+                            prod_actual["nombre"] = variante_elegida["nombre"]
+                            prod_actual["precio"] = variante_elegida["precio"]
                     except ValueError:
-                        print("Dato inválido, se agrega la versión normal.")
+                        pass
 
-                if prod["stock"] <= 0:
-                    print("Sin stock")
+                if prod_original["stock"] <= 0:
                     continue
 
-                cantidad_input = (
-                    input(f"¿Cuántos de {prod['nombre']} necesitas? (Max 4): ")
-                    .strip()
-                    .lower()
-                )
+                cantidad_input = input().strip()
                 cantidad = int(cantidad_input)
 
-                if 0 < cantidad <= 4 and cantidad <= prod["stock"]:
+                if 0 < cantidad <= 4 and cantidad <= prod_original["stock"]:
                     productos_lista[idx]["stock"] -= cantidad
-                    carrito.append(f"{cantidad}x {prod['nombre']}")
-                    total_cuenta += prod["precio"] * cantidad
-                    print(f"Agregaste {cantidad} de {prod['nombre']}")
+                    carrito.append(f"{cantidad}x {prod_actual['nombre']}")
+                    total_cuenta += prod_actual["precio"] * cantidad
 
                     if productos_lista[idx]["stock"] < 5:
                         almacen = db["almacen"]
-                        producto_almacen = almacen.find_one(
-                            {"nombre": productos_lista[idx]["nombre"]}
-                        )
-                        if producto_almacen and producto_almacen["stock"] > 10:
+                        producto_almacen = almacen.find_one({"nombre": prod_original["nombre"]})
+                        if producto_almacen and producto_almacen.get("stock", 0) > 10:
                             almacen.update_one(
-                                {"nombre": productos_lista[idx]["nombre"]},
-                                {"$inc": {"stock": -10}},
+                                {"nombre": prod_original["nombre"]},
+                                {"$inc": {"stock": -10}}
                             )
                             productos_lista[idx]["stock"] += 10
-                            print(
-                                f" ¡Stock bajo! El almacén recargó 10 unidades de {productos_lista[idx]['nombre']}"
-                            )
-                else:
-                    print("Cantidad inválida o supera el stock/límite.")
-            else:
-                print("Opción no válida.")
 
-            respuesta = input("¿Seguir comprando? (si/no): ").strip().lower()
+            respuesta = input().strip().lower()
             if respuesta == "no":
                 break
-            elif respuesta != "si":
-                print("Respuesta inválida, escribe 'si' o 'no'")
-                break
         except ValueError:
-            print("Dato inválido.")
+            pass
 
     if total_cuenta > 0:
-        print(f"\nTotal a pagar: ${total_cuenta}")
+        for item in carrito:
+            print(f"{item}")
+        
         while pago_comprador < total_cuenta:
             try:
-                dinero_raw = (
-                    input(
-                        f"Faltan ${total_cuenta - pago_comprador}. Ingresa dinero: "
-                    )
-                    .strip()
-                    .lower()
-                )
+                dinero_raw = input().strip().lower()
                 if dinero_raw == "no":
-                    break
+                    return saldo_tienda
                 dinero = int(dinero_raw)
                 if dinero > 0:
                     pago_comprador += dinero
-                else:
-                    print("Monto inválido.")
             except ValueError:
-                print("Dato inválido.")
+                pass
 
-        cambio = pago_comprador - total_cuenta
-        saldo_tienda += pago_comprador
-        saldo_tienda -= cambio
-        print(f"\nTu cambio: ${cambio}")
+        saldo_tienda += total_cuenta
 
     return saldo_tienda
 
-
-saldo_tienda = condiciones(
-    saldo_tienda, pago_comprador, carrito, total_cuenta, productos_lista
-)
-guardar_datos(saldo_tienda, productos_lista)
-
-print(f"Saldo final tienda: ${saldo_tienda}")
-print("¡Datos guardados! Gracias por su compra.")
+if __name__ == "__main__":
+    saldo_tienda = condiciones(saldo_tienda, pago_comprador, carrito, total_cuenta, productos_lista)
+    sincronizar_inventario_y_saldo(saldo_tienda, productos_lista)
