@@ -6,15 +6,16 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 
 load_dotenv(".env")
-client = MongoClient(uri)
+MONGO_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017/")
+client = MongoClient(MONGO_URI)
+
 db = client["mapache"]
 coleccion_ventas = db["cafeteria"]
 coleccion_tokens = db["tokens"]
-saldo_col = db["saldo_cafeteria"] # Reemplazo de variable global para el saldo de la tienda
+saldo_col = db["saldo_cafeteria"] 
 
 app = FastAPI(title="Cafetería Mapache API")
 
-# Base de datos local fija de productos
 bebidas = [
     {"id": 1, "nombre": "cafe sencillo", "precio": 2200, "categoria": "bebida"},
     {"id": 2, "nombre": "cafe con leche", "precio": 2500, "categoria": "bebida"},
@@ -42,11 +43,11 @@ postres = [
 ]
 
 menu_dict = {item["id"]: item for item in (bebidas + postres)}
-class ContenidoPago(BaseModel):
-    nombre_cliente: Optional[str] = "anonimo"
-    productos_ids: List[int] = Field(..., min_length=1, description="Lista de IDs de productos comprados")
-    dinero_ingresado: int
 
+class ContenidoPago(BaseModel):
+    nombre_cliente: Optional[str] = ""
+    productos_ids: List[int] = Field(..., min_length=1)
+    dinero_ingresado: int
 
 @app.get("/menu")
 def obtener_menu():
@@ -56,34 +57,27 @@ def obtener_menu():
 def pagar(pago: ContenidoPago):
     nombre_limpio = pago.nombre_cliente.strip().lower()
     
-    # 1. Reconstruir la orden sin depender de variables globales de memoria
     items_a_comprar = []
     total_carrito = 0
     
     for pid in pago.productos_ids:
         if pid not in menu_dict:
-            raise HTTPException(status_code=404, detail=f"El producto con ID {pid} no existe.")
+            raise HTTPException(status_code=404)
         producto = menu_dict[pid]
         items_a_comprar.append(producto)
         total_carrito += producto["precio"]
 
-    # 2. Consultar tokens ANTES de pagar para aplicar el descuento del 5% si califica
     datos_cliente = coleccion_tokens.find_one({"nombre": nombre_limpio})
     tokens_previos = datos_cliente["tokens"] if datos_cliente else 0
     
     aplicó_descuento = False
-    if tokens_previos >= 10 and tokens_previos < 20:
-        total_carrito = int(total_carrito * 0.95) # Aplica 5% real de descuento
+    if 10 <= tokens_previos < 20:
+        total_carrito = int(total_carrito * 0.95)
         aplicó_descuento = True
 
-    # 3. Validar solvencia económica
     if pago.dinero_ingresado < total_carrito:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
-            detail=f"Dinero insuficiente. Total a pagar (con descuentos si aplican): {total_carrito}"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
 
-    # 4. Preparar inserción masiva a MongoDB (Eficiencia de red)
     ventas_db = []
     for eleccion in items_a_comprar:
         ventas_db.append({
@@ -94,42 +88,27 @@ def pagar(pago: ContenidoPago):
         })
         
     if ventas_db:
-        coleccion_ventas.insert_many(ventas_db) # Un solo viaje a la base de datos
+        coleccion_ventas.insert_many(ventas_db)
 
-    # 5. Gestión del sistema de Tokens acumulativos
-    # Si ya tenía más de 20, se reinicia para el peluche. Si no, suma 1 por la compra.
     if tokens_previos >= 20:
         coleccion_tokens.update_one({"nombre": nombre_limpio}, {"$set": {"tokens": 1}}, upsert=True)
         tokens_actuales = 1
-        premio = "¡PELUCHE MAPACHE ENTREGADO! Tus puntos vuelven a empezar. 🦝"
     else:
         coleccion_tokens.update_one({"nombre": nombre_limpio}, {"$inc": {"tokens": 1}}, upsert=True)
         tokens_actuales = tokens_previos + 1
-        
-        # Evaluar strings de premios informativos
-        if tokens_actuales >= 20:
-            premio = "¡Felicidades! Llegaste a 20 tokens. ¡En tu próxima compra reclamas el PELUCHE MAPACHE GIGANTE! 🦝"
-        elif tokens_actuales >= 10:
-            premio = "¡Tienes un 5% de descuento activo para tu siguiente compra!"
-        elif tokens_actuales >= 5:
-            premio = "¡Tienes un Postre gratis disponible!"
-        else:
-            premio = "Sigue acumulando para tus tazas o tu mapache gigante 🦝"
 
-    # 6. Actualizar el saldo histórico de la caja en MongoDB de forma segura
     saldo_col.update_one({}, {"$inc": {"saldo_total_tienda": total_carrito}}, upsert=True)
-    saldo_actual_tienda = saldo_col.find_one({})["saldo_total_tienda"]
+    saldo_doc = saldo_col.find_one({})
+    saldo_actual_tienda = saldo_doc.get("saldo_total_tienda", total_carrito) if saldo_doc else total_carrito
 
     return {
-        "mensaje": "pago realizado exitosamente",
         "total_cuenta_cobrado": total_carrito,
         "descuento_aplicado": aplicó_descuento,
         "dinero_recibido": pago.dinero_ingresado,
         "cambio_devuelto": pago.dinero_ingresado - total_carrito,
         "saldo_historico_cafeteria": saldo_actual_tienda,
         "nombre_cliente": nombre_limpio,
-        "tokens_mapache_actuales": tokens_actuales,
-        "premio_status": premio
+        "tokens_mapache_actuales": tokens_actuales
     }
 
 if __name__ == "__main__":
