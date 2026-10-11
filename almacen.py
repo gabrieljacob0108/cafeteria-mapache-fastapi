@@ -1,6 +1,6 @@
-from dotenv import load_dotenv
 import os
-from pymongo import MongoClient
+from dotenv import load_dotenv
+from pymongo import MongoClient, UpdateOne
 
 load_dotenv(".env")
 password = os.environ.get("MONGODB_PWD")
@@ -9,39 +9,40 @@ client = MongoClient(uri)
 db = client["tienda"]
 coleccion = db["almacen"]
 
-
 def cargar_existencias():
-    productos = list(coleccion.find({}, {"_id": 0}))
-    return productos if productos else None
+    return list(coleccion.find({}))
 
-def guardar_existencias(lista_productos):
-    coleccion.delete_many({})
-    coleccion.insert_many(lista_productos)
+def verificar_y_recargar_automatico(producto):
+    UMBRAL_MINIMO = 4
+    CANTIDAD_RECARGA = 15
+
+    if producto["stock"] <= UMBRAL_MINIMO:
+        producto["stock"] += CANTIDAD_RECARGA
+        coleccion.update_one(
+            {"_id": producto["_id"]},
+            {"$set": {"stock": producto["stock"]}}
+        )
+
+def actualizar_un_solo_producto(producto):
+    coleccion.update_one(
+        {"_id": producto["_id"]},
+        {"$set": {"stock": producto["stock"]}}
+    )
 
 def pedir_cantidad(mensaje):
     try:
-        cantidad = int(input(mensaje).strip())
-
+        cantidad = int(input().strip())
         if cantidad <= 0:
-            print("La cantidad debe ser mayor a 0.")
             return None
-
         return cantidad
-
     except ValueError:
-        print("Cantidad inválida. Ingresa un número.")
         return None
 
-
 def gestionar_almacen():
-    datos_guardados = cargar_existencias()
+    productos = cargar_existencias()
 
-    if datos_guardados:
-        productos = datos_guardados
-        print("¡Datos del almacén cargados exitosamente!")
-    else:
-        productos = [
-            # Máquina Expendedora
+    if not productos:
+        inventario_inicial = [
             {"nombre": "Papas", "stock": 28000, "categoria": "maquina"},
             {"nombre": "Gaseosa", "stock": 20000, "categoria": "maquina"},
             {"nombre": "Caramelos", "stock": 30000, "categoria": "maquina"},
@@ -49,176 +50,77 @@ def gestionar_almacen():
             {"nombre": "Galletas", "stock": 30000, "categoria": "maquina"},
             {"nombre": "Jugo", "stock": 30000, "categoria": "maquina"},
             {"nombre": "Agua", "stock": 30000, "categoria": "maquina"},
-            # Supermercado
-            {
-                "nombre": "bolsa de papas*12",
-                "stock": 30000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "caja de jugo*12",
-                "stock": 20000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "harina*16",
-                "stock": 20000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "cafe molido*10",
-                "stock": 20000,
-                "categoria": "supermercado",
-            },
+            {"nombre": "bolsa de papas*12", "stock": 30000, "categoria": "supermercado"},
+            {"nombre": "caja de jugo*12", "stock": 20000, "categoria": "supermercado"},
+            {"nombre": "harina*16", "stock": 20000, "categoria": "supermercado"},
+            {"nombre": "cafe molido*10", "stock": 20000, "categoria": "supermercado"},
             {"nombre": "aceite*15", "stock": 22000, "categoria": "supermercado"},
-            {
-                "nombre": "pastillas de panela*30",
-                "stock": 23000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "pastillas de chocolate*30",
-                "stock": 20000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "botellas de agua*16",
-                "stock": 20000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "pan de molde*12",
-                "stock": 22000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "arroz 1kg*20",
-                "stock": 40000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "galletas de soda*6paquetes",
-                "stock": 21000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "leche entera*8",
-                "stock": 30000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "empaques de brownie*15",
-                "stock": 15000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "galletas de red velvet",
-                "stock": 30000,
-                "categoria": "supermercado",
-            },
-            {
-                "nombre": "postres de red velvet",
-                "stock": 20000,
-                "categoria": "supermercado",
-            },
+            {"nombre": "pastillas de panela*30", "stock": 23000, "categoria": "supermercado"},
+            {"nombre": "pastillas de chocolate*30", "stock": 20000, "categoria": "supermercado"},
+            {"nombre": "botellas de agua*16", "stock": 20000, "categoria": "supermercado"},
+            {"nombre": "pan de molde*12", "stock": 22000, "categoria": "supermercado"},
+            {"nombre": "arroz 1kg*20", "stock": 40000, "categoria": "supermercado"},
+            {"nombre": "galletas de soda*6paquetes", "stock": 21000, "categoria": "supermercado"},
+            {"nombre": "leche entera*8", "stock": 30000, "categoria": "supermercado"},
+            {"nombre": "empaques de brownie*15", "stock": 15000, "categoria": "supermercado"},
+            {"nombre": "galletas de red velvet", "stock": 30000, "categoria": "supermercado"},
+            {"nombre": "postres de red velvet", "stock": 20000, "categoria": "supermercado"},
         ]
-        print("Iniciando nuevo inventario de almacén.")
-        guardar_existencias(productos)
+        coleccion.insert_many(inventario_inicial)
+        productos = cargar_existencias()
 
     indices = {str(i + 1): i for i in range(len(productos))}
 
     while True:
-        print("\n--- INVENTARIO DE ALMACÉN ---")
-        print("\n SUPERMERCADO:")
-        for k in indices:
-            producto = productos[indices[k]]
-            if producto["categoria"] == "supermercado":
-                print(f"{k}. {producto['nombre']} - Stock: {producto['stock']}")
+        for k, idx in indices.items():
+            prod = productos[idx]
+            if prod["categoria"] == "supermercado":
+                print(f"{k} {prod['stock']}")
 
-        print("\n MÁQUINA EXPENDEDORA:")
-        for k in indices:
-            producto = productos[indices[k]]
-            if producto["categoria"] == "maquina":
-                print(f"{k}. {producto['nombre']} - Stock: {producto['stock']}")
+        for k, idx in indices.items():
+            prod = productos[idx]
+            if prod["categoria"] == "maquina":
+                print(f"{k} {prod['stock']}")
 
-        print("\n--- OPCIONES ---")
-        print("1. Preparar salida de producto")
-        print("2. Cargar stock al almacén")
-        print("3. Salir")
+        opcion = input().strip()
 
-        opcion = input("\n¿Qué deseas hacer?: ").strip().lower()
-
-        if opcion == "3" or opcion == "no":
-            guardar_existencias(productos)
-            print("Datos guardados. Saliendo del almacén.")
+        if opcion == "3":
             return
 
         if opcion not in ["1", "2"]:
-            print("Opción inválida.")
             continue
 
-        eleccion = input("\nSeleccione el número del producto: ").strip().lower()
+        eleccion = input().strip()
 
         if eleccion not in indices:
-            print("Código inválido. Selecciona un número válido.")
             continue
 
-        idx = indices[eleccion]
-        prod = productos[idx]
-
-        print(f"\nProducto seleccionado: {prod['nombre']}")
-        print(f"Stock actual: {prod['stock']} unidades.")
+        prod = productos[indices[eleccion]]
 
         if opcion == "1":
             if prod["stock"] <= 0:
-                print("Sin stock.")
                 continue
 
-            cantidad = pedir_cantidad(
-                "¿Cuántas unidades deseas preparar para salida?: "
-            )
-
+            cantidad = pedir_cantidad("")
             if cantidad is None:
                 continue
 
-            if cantidad > prod["stock"]:
-                print("No hay suficiente stock en almacén.")
-            else:
+            if cantidad <= prod["stock"]:
                 prod["stock"] -= cantidad
-                print(
-                    f"Salida preparada. Quedan {prod['stock']} unidades en almacén."
-                )
-                guardar_existencias(productos)
+                actualizar_un_solo_producto(prod)
+                verificar_y_recargar_automatico(prod)
 
         elif opcion == "2":
-            cantidad = pedir_cantidad(
-                "¿Cuántas unidades deseas cargar al almacén?: "
-            )
-
+            cantidad = pedir_cantidad("")
             if cantidad is None:
                 continue
 
             prod["stock"] += cantidad
-            print(
-                f"Stock cargado correctamente. Ahora hay {prod['stock']} unidades de {prod['nombre']}."
-            )
-            guardar_existencias(productos)
+            actualizar_un_solo_producto(prod)
 
-        while True:
-            continuar = (
-                input("\n¿Quieres gestionar otro producto? (si/no): ")
-                .strip()
-                .lower()
-            )
+        continuar = input().strip().lower()
+        if continuar != "si":
+            return
 
-            if continuar == "si":
-                break
-            elif continuar == "no":
-                guardar_existencias(productos)
-                print("Datos guardados. Saliendo del almacén.")
-                return
-            else:
-                print("Escribe únicamente 'si' o 'no'.")
-
-
-gestionar_almacen()
+if __name__ == "__main__":
+    gestionar_almacen()
